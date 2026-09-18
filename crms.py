@@ -1,102 +1,79 @@
 from __future__ import annotations
-import argparse, json, time
+import argparse,json,time
 from pathlib import Path
 import numpy as np
 import pandas as pd
 import requests
-
-BASES=['https://api.binance.us/api/v3/klines','https://api.binance.com/api/v3/klines']
-ASSETS=['BTCUSDT','ETHUSDT','SOLUSDT','DOTUSDT','AVAXUSDT','SUIUSDT','XRPUSDT']
-DATA=Path('data'); OUT=Path('output')
-
+BASES=['https://api.binance.us/api/v3/klines','https://api.binance.com/api/v3/klines']; ASSETS=['BTCUSDT','ETHUSDT','SOLUSDT','DOTUSDT','AVAXUSDT','SUIUSDT','XRPUSDT']; DATA=Path('data');OUT=Path('output')
 def fetch(symbol,start='2017-01-01'):
-    DATA.mkdir(exist_ok=True)
-    last_error=None
-    for base in BASES:
-        try:
-            start_ms=int(pd.Timestamp(start,tz='UTC').timestamp()*1000); rows=[]
-            while True:
-                r=requests.get(base,params={'symbol':symbol,'interval':'1d','startTime':start_ms,'limit':1000},timeout=30)
-                if r.status_code==400 and 'Invalid symbol' in r.text: raise RuntimeError(f'{symbol} unavailable at {base}')
-                r.raise_for_status(); x=r.json()
-                if not x: break
-                rows.extend(x); start_ms=x[-1][6]+1
-                if len(x)<1000: break
-                time.sleep(.08)
-            if not rows: raise RuntimeError(f'No rows for {symbol} from {base}')
-            cols=['open_time','open','high','low','close','volume','close_time','qv','trades','tb','tq','ignore']
-            df=pd.DataFrame(rows,columns=cols)
-            for c in ['open','high','low','close','volume']: df[c]=pd.to_numeric(df[c])
-            df['date']=pd.to_datetime(df.open_time,unit='ms',utc=True); df=df.set_index('date')
-            now=int(pd.Timestamp.now(tz='UTC').timestamp()*1000); df=df[df.close_time<now]
-            df[['open','high','low','close','volume']].to_csv(DATA/f'{symbol}.csv')
-            print(f'DATA {symbol}: {base} ({len(df)} bars)')
-            return df[['open','high','low','close','volume']]
-        except Exception as e:
-            last_error=e; print(f'WARN provider failed {symbol} {base}: {e}')
-    raise RuntimeError(f'No market-data provider available for {symbol}: {last_error}')
-
-def psar(df,step=.02,max_step=.2):
-    h,l,c=df.high.values,df.low.values,df.close.values; n=len(df)
-    sar=np.full(n,np.nan); bull=np.ones(n,dtype=bool)
-    if n<3:return pd.DataFrame({'psar':sar,'bull':bull},index=df.index)
-    bull[1]=c[1]>=c[0]; sar[1]=l[0] if bull[1] else h[0]; ep=h[1] if bull[1] else l[1]; af=step
-    for i in range(2,n):
-        s=sar[i-1]+af*(ep-sar[i-1]); b=bull[i-1]
-        if b:
-            s=min(s,l[i-1],l[i-2])
-            if l[i]<s: b=False;s=ep;ep=l[i];af=step
-            elif h[i]>ep: ep=h[i];af=min(max_step,af+step)
-        else:
-            s=max(s,h[i-1],h[i-2])
-            if h[i]>s: b=True;s=ep;ep=h[i];af=step
-            elif l[i]<ep: ep=l[i];af=min(max_step,af+step)
-        sar[i]=s;bull[i]=b
-    return pd.DataFrame({'psar':sar,'bull':bull},index=df.index)
-
-def indicators(df):
-    z=df.copy(); p=psar(z);z['psar']=p.psar;z['psar_bull']=p.bull
-    e12=z.close.ewm(span=12,adjust=False).mean();e26=z.close.ewm(span=26,adjust=False).mean();z['macd']=e12-e26;z['macd_signal']=z.macd.ewm(span=9,adjust=False).mean();z['macd_hist']=z.macd-z.macd_signal
-    d=z.close.diff();up=d.clip(lower=0);dn=-d.clip(upper=0);rs=up.ewm(alpha=1/14,adjust=False).mean()/dn.ewm(alpha=1/14,adjust=False).mean();z['rsi']=100-100/(1+rs)
-    pc=z.close.shift();tr=pd.concat([(z.high-z.low),(z.high-pc).abs(),(z.low-pc).abs()],axis=1).max(axis=1);z['atr']=tr.ewm(alpha=1/14,adjust=False).mean()
-    plus=z.high.diff();minus=-z.low.diff();pdm=plus.where((plus>minus)&(plus>0),0);mdm=minus.where((minus>plus)&(minus>0),0);atr=z.atr
-    z['plus_di']=100*pdm.ewm(alpha=1/14,adjust=False).mean()/atr;z['minus_di']=100*mdm.ewm(alpha=1/14,adjust=False).mean()/atr;dx=100*(z.plus_di-z.minus_di).abs()/(z.plus_di+z.minus_di);z['adx']=dx.ewm(alpha=1/14,adjust=False).mean()
-    for n in [20,50,100,200]: z[f'ema{n}']=z.close.ewm(span=n,adjust=False).mean()
-    z['rvol20']=z.volume/z.volume.rolling(20).mean();return z
-
-def weekly_regime(df):
-    w=df.resample('W-SUN',label='right',closed='right').agg({'open':'first','high':'max','low':'min','close':'last','volume':'sum'}).dropna();p=psar(w);w['weekly_psar']=p.psar;w['weekly_bull']=p.bull
-    return w[['weekly_psar','weekly_bull']].shift(1).reindex(df.index,method='ffill')
-
-def events(symbol,z):
-    flips=z.psar_bull.ne(z.psar_bull.shift()) & z.psar.notna(); out=[]
-    for i in np.flatnonzero(flips.values):
-        if i+1>=len(z):continue
-        side=1 if z.psar_bull.iloc[i] else -1; entry=z.close.iloc[i]
-        row={'symbol':symbol,'date':str(z.index[i]),'side':'LONG' if side==1 else 'SHORT','entry':entry,'weekly_bull':bool(z.weekly_bull.iloc[i]) if pd.notna(z.weekly_bull.iloc[i]) else None,'rsi':z.rsi.iloc[i],'adx':z.adx.iloc[i],'macd_hist':z.macd_hist.iloc[i],'rvol20':z.rvol20.iloc[i]}
-        for h in [1,3,5,10,20,30,60]: row[f'r{h}']=side*(z.close.iloc[i+h]/entry-1) if i+h<len(z) else np.nan
-        j=min(i+60,len(z)-1); hi=z.high.iloc[i+1:j+1].max();lo=z.low.iloc[i+1:j+1].min();row['mfe60']=(hi/entry-1) if side==1 else (entry/lo-1);row['mae60']=(lo/entry-1) if side==1 else (entry/hi-1)
-        out.append(row)
-    return out
-
+ DATA.mkdir(exist_ok=True);err=None
+ for base in BASES:
+  try:
+   ms=int(pd.Timestamp(start,tz='UTC').timestamp()*1000);rows=[]
+   while True:
+    r=requests.get(base,params={'symbol':symbol,'interval':'1d','startTime':ms,'limit':1000},timeout=30);r.raise_for_status();x=r.json()
+    if not x:break
+    rows+=x;ms=x[-1][6]+1
+    if len(x)<1000:break
+    time.sleep(.05)
+   if not rows:raise RuntimeError('no rows')
+   cols=['ot','open','high','low','close','volume','ct','q','n','tb','tq','i'];d=pd.DataFrame(rows,columns=cols)
+   for c in ['open','high','low','close','volume']:d[c]=pd.to_numeric(d[c])
+   d['date']=pd.to_datetime(d.ot,unit='ms',utc=True);d=d.set_index('date');d=d[d.ct<int(pd.Timestamp.now(tz='UTC').timestamp()*1000)]
+   print(f'DATA {symbol}: {base} ({len(d)} bars)');return d[['open','high','low','close','volume']]
+  except Exception as e:err=e
+ raise RuntimeError(err)
+def psar(d,step=.02,max_step=.2):
+ h,l,c=d.high.values,d.low.values,d.close.values;n=len(d);s=np.full(n,np.nan);b=np.ones(n,dtype=bool)
+ if n<3:return pd.DataFrame({'psar':s,'bull':b},index=d.index)
+ b[1]=c[1]>=c[0];s[1]=l[0] if b[1] else h[0];ep=h[1] if b[1] else l[1];af=step
+ for i in range(2,n):
+  q=s[i-1]+af*(ep-s[i-1]);u=b[i-1]
+  if u:
+   q=min(q,l[i-1],l[i-2])
+   if l[i]<q:u=False;q=ep;ep=l[i];af=step
+   elif h[i]>ep:ep=h[i];af=min(max_step,af+step)
+  else:
+   q=max(q,h[i-1],h[i-2])
+   if h[i]>q:u=True;q=ep;ep=h[i];af=step
+   elif l[i]<ep:ep=l[i];af=min(max_step,af+step)
+  s[i]=q;b[i]=u
+ return pd.DataFrame({'psar':s,'bull':b},index=d.index)
+def indicators(d):
+ z=d.copy();p=psar(z);z['psar']=p.psar;z['psar_bull']=p.bull;e12=z.close.ewm(span=12,adjust=False).mean();e26=z.close.ewm(span=26,adjust=False).mean();z['macd']=e12-e26;sig=z.macd.ewm(span=9,adjust=False).mean();z['macd_hist']=z.macd-sig;z['macd_up']=z.macd_hist>z.macd_hist.shift()
+ q=z.close.diff();up=q.clip(lower=0);dn=-q.clip(upper=0);rs=up.ewm(alpha=1/14,adjust=False).mean()/dn.ewm(alpha=1/14,adjust=False).mean();z['rsi']=100-100/(1+rs);pc=z.close.shift();tr=pd.concat([z.high-z.low,(z.high-pc).abs(),(z.low-pc).abs()],axis=1).max(axis=1);z['atr']=tr.ewm(alpha=1/14,adjust=False).mean();plus=z.high.diff();minus=-z.low.diff();pdm=plus.where((plus>minus)&(plus>0),0);mdm=minus.where((minus>plus)&(minus>0),0);z['plus_di']=100*pdm.ewm(alpha=1/14,adjust=False).mean()/z.atr;z['minus_di']=100*mdm.ewm(alpha=1/14,adjust=False).mean()/z.atr;dx=100*(z.plus_di-z.minus_di).abs()/(z.plus_di+z.minus_di);z['adx']=dx.ewm(alpha=1/14,adjust=False).mean();z['rvol20']=z.volume/z.volume.rolling(20).mean();return z
+def weekly(d):
+ w=d.resample('W-SUN',label='right',closed='right').agg({'open':'first','high':'max','low':'min','close':'last','volume':'sum'}).dropna();p=psar(w);w['weekly_bull']=p.bull;return w[['weekly_bull']].shift(1).reindex(d.index,method='ffill')
+def event_rows(sym,z):
+ flip=z.psar_bull.ne(z.psar_bull.shift())&z.psar.notna();rows=[]
+ for i in np.flatnonzero(flip.values):
+  if i+1>=len(z):continue
+  side=1 if z.psar_bull.iloc[i] else -1;entry=z.close.iloc[i];sar=z.psar.iloc[i];r={'symbol':sym,'date':str(z.index[i]),'side':'LONG' if side==1 else 'SHORT','entry':entry,'weekly_ok':bool(z.weekly_bull.iloc[i])==bool(side==1) if pd.notna(z.weekly_bull.iloc[i]) else False,'macd_ok':bool(z.macd_up.iloc[i])==bool(side==1),'di_ok':bool(z.plus_di.iloc[i]>z.minus_di.iloc[i])==bool(side==1),'adx20':z.adx.iloc[i]>=20,'rsi':z.rsi.iloc[i],'rvol20':z.rvol20.iloc[i]}
+  # retest: within next 5 bars price trades back within 1 ATR of flip SAR, without requiring future knowledge at entry
+  end=min(i+5,len(z)-1);zone=max(z.atr.iloc[i],abs(entry-sar)*.25);hit=None
+  for k in range(i+1,end+1):
+   if z.low.iloc[k]<=sar+zone and z.high.iloc[k]>=sar-zone:hit=k;break
+  r['retest5']=hit is not None;r['retest_delay']=hit-i if hit else np.nan;r['retest_entry']=z.close.iloc[hit] if hit else np.nan
+  for h in [5,10,20,30,60]:
+   r[f'immediate_r{h}']=side*(z.close.iloc[i+h]/entry-1) if i+h<len(z) else np.nan
+   r[f'retest_r{h}']=side*(z.close.iloc[hit+h]/z.close.iloc[hit]-1) if hit is not None and hit+h<len(z) else np.nan
+  rows.append(r)
+ return rows
+def summarize(ev):
+ rows=[];filters={'ALL':pd.Series(True,index=ev.index),'WEEKLY':ev.weekly_ok,'MACD':ev.macd_ok,'DI':ev.di_ok,'ADX20':ev.adx20,'WEEKLY_MACD_DI':ev.weekly_ok&ev.macd_ok&ev.di_ok,'CONF4':ev.weekly_ok&ev.macd_ok&ev.di_ok&ev.adx20}
+ for side in ['LONG','SHORT']:
+  base=ev.side.eq(side)
+  for name,f in filters.items():
+   g=ev[base&f]
+   for h in [5,10,20,30,60]:
+    x=g[f'immediate_r{h}'].dropna();rt=g[g.retest5][f'retest_r{h}'].dropna();rows.append({'side':side,'filter':name,'horizon':h,'n':len(x),'win':(x>0).mean() if len(x) else np.nan,'mean':x.mean(),'median':x.median(),'retest_rate':g.retest5.mean() if len(g) else np.nan,'retest_n':len(rt),'retest_win':(rt>0).mean() if len(rt) else np.nan,'retest_mean':rt.mean()})
+ return pd.DataFrame(rows)
 def run_all():
-    OUT.mkdir(exist_ok=True); all_events=[]; latest={}; failures={}
-    for s in ASSETS:
-        try:
-            d=fetch(s);z=indicators(d);z=z.join(weekly_regime(d));all_events+=events(s,z);r=z.iloc[-1]
-            latest[s]={k:(bool(r[k]) if k in ['psar_bull','weekly_bull'] and pd.notna(r[k]) else (None if pd.isna(r[k]) else float(r[k]))) for k in ['close','psar','psar_bull','weekly_psar','weekly_bull','rsi','adx','plus_di','minus_di','macd_hist','rvol20']}
-        except Exception as e:
-            failures[s]=str(e); print(f'ERROR {s}: {e}')
-    if not latest: raise RuntimeError(f'All assets failed: {failures}')
-    ev=pd.DataFrame(all_events);ev.to_csv(OUT/'events.csv',index=False)
-    summary=[]
-    if not ev.empty:
-        for (sym,side),g in ev.groupby(['symbol','side']):
-            for h in [5,10,20,30,60]:
-                x=g[f'r{h}'].dropna();summary.append({'symbol':sym,'side':side,'horizon':h,'n':len(x),'win_rate':(x>0).mean(),'mean':x.mean(),'median':x.median(),'mean_mfe60':g.mfe60.mean(),'mean_mae60':g.mae60.mean()})
-    pd.DataFrame(summary).to_csv(OUT/'backtest_summary.csv',index=False)
-    (OUT/'latest.json').write_text(json.dumps({'generated_at':pd.Timestamp.now(tz='UTC').isoformat(),'assets':latest,'failures':failures},indent=2))
-    print(pd.DataFrame(summary).to_string(index=False)); print('FAILURES',failures)
-
+ OUT.mkdir(exist_ok=True);allr=[];fails={}
+ for s in ASSETS:
+  try:d=fetch(s);z=indicators(d).join(weekly(d));allr+=event_rows(s,z)
+  except Exception as e:fails[s]=str(e)
+ ev=pd.DataFrame(allr);ev.to_csv(OUT/'events.csv',index=False);summary=summarize(ev);summary.to_csv(OUT/'confirmation_retest.csv',index=False)
+ print('\nPOOLED CONFIRMATION/RETEST RESULTS\n');print(summary.to_string(index=False));print('FAILURES',fails)
 if __name__=='__main__':
-    ap=argparse.ArgumentParser();ap.add_argument('command',choices=['run-all']);a=ap.parse_args();run_all()
+ a=argparse.ArgumentParser();a.add_argument('command',choices=['run-all']);a.parse_args();run_all()
