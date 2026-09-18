@@ -17,9 +17,10 @@ for s in ASSETS:
 btc=next(x for x in F if x.symbol.iloc[0]=='BTCUSDT');b=btc[['r5','r10','r20','e20','e50','e200']].rename(columns={x:'b'+x for x in ['r5','r10','r20','e20','e50','e200']})
 for z in F:
  z[b.columns]=b.reindex(z.index).ffill();z['btcbull']=(z.be20>z.be50)&(z.be50>z.be200);z['btcmom']=z.br20>0;z['rs5']=z.r5-z.br5;z['rs10']=z.r10-z.br10;z['rs20']=z.r20-z.br20
-df=pd.concat(F).sort_index();D=df.index.unique().sort_values();c1=D[int(len(D)*.55)];c2=D[int(len(D)*.75)]
+df=pd.concat(F).sort_index();D=pd.DatetimeIndex(pd.to_datetime(df.index,utc=True)).tz_convert(None).unique().sort_values();c1=D[int(len(D)*.55)];c2=D[int(len(D)*.75)]
 C={'weekly':df.weekly_bull.eq(True),'stack':df.ema_stack,'btcbull':df.btcbull,'btcmom':df.btcmom,'macdpos':df.macd_hist>0,'macdup':df.macd_up,'dip':df.dip>0,'di10':df.dip>10,'adx20':df.adx>=20,'adx25':df.adx>=25,'adxup':df.adxup,'rsi50':df.rsi>=50,'rsi5570':(df.rsi>=55)&(df.rsi<=70),'rsiup':df.rsiup,'rv1':df.rvol20>=1,'rv15':df.rvol20>=1.5,'m5':df.r5>.02,'m10':df.r10>.05,'m20':df.r20>.1,'break20':df.break20,'break50':df.break50,'rs5':df.rs5>0,'rs10':df.rs10>0,'rs20':df.rs20>0,'rs10x':df.rs10>.05,'atrexp':df.atrexp,'psar':df.psar_bull,'psarnew3':df.psar_new3}
-X=np.column_stack([C[k].fillna(False).to_numpy(bool) for k in C]);names=list(C);idx=df.index.to_numpy();train=idx<np.datetime64(c1.to_datetime64());valid=(idx>=np.datetime64(c1.to_datetime64()))&(idx<np.datetime64(c2.to_datetime64()));test=idx>=np.datetime64(c2.to_datetime64())
+X=np.column_stack([C[k].fillna(False).to_numpy(bool) for k in C]);names=list(C)
+idx=pd.DatetimeIndex(pd.to_datetime(df.index,utc=True)).tz_convert(None).to_numpy(dtype='datetime64[ns]');c1n=np.datetime64(c1.to_datetime64(),'ns');c2n=np.datetime64(c2.to_datetime64(),'ns');train=idx<c1n;valid=(idx>=c1n)&(idx<c2n);test=idx>=c2n
 def stat(mask,y,part):
  q=mask&part&np.isfinite(y);n=int(q.sum());return n,float((y[q]>0).mean()) if n else 0,float(y[q].mean()) if n else 0,float(np.median(y[q])) if n else 0
 print(f'SPLIT|{c1.date()}|{c2.date()}|assets={len(F)}|rows={len(df)}',flush=True)
