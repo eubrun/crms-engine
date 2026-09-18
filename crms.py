@@ -5,26 +5,36 @@ import numpy as np
 import pandas as pd
 import requests
 
-BASE='https://api.binance.com/api/v3/klines'
+BASES=['https://api.binance.us/api/v3/klines','https://api.binance.com/api/v3/klines']
 ASSETS=['BTCUSDT','ETHUSDT','SOLUSDT','DOTUSDT','AVAXUSDT','SUIUSDT','XRPUSDT']
 DATA=Path('data'); OUT=Path('output')
 
 def fetch(symbol,start='2017-01-01'):
     DATA.mkdir(exist_ok=True)
-    start_ms=int(pd.Timestamp(start,tz='UTC').timestamp()*1000); rows=[]
-    while True:
-        r=requests.get(BASE,params={'symbol':symbol,'interval':'1d','startTime':start_ms,'limit':1000},timeout=30); r.raise_for_status(); x=r.json()
-        if not x: break
-        rows.extend(x); start_ms=x[-1][6]+1
-        if len(x)<1000: break
-        time.sleep(.08)
-    cols=['open_time','open','high','low','close','volume','close_time','qv','trades','tb','tq','ignore']
-    df=pd.DataFrame(rows,columns=cols)
-    for c in ['open','high','low','close','volume']: df[c]=pd.to_numeric(df[c])
-    df['date']=pd.to_datetime(df.open_time,unit='ms',utc=True); df=df.set_index('date')
-    now=int(pd.Timestamp.now(tz='UTC').timestamp()*1000); df=df[df.close_time<now]
-    df[['open','high','low','close','volume']].to_csv(DATA/f'{symbol}.csv')
-    return df[['open','high','low','close','volume']]
+    last_error=None
+    for base in BASES:
+        try:
+            start_ms=int(pd.Timestamp(start,tz='UTC').timestamp()*1000); rows=[]
+            while True:
+                r=requests.get(base,params={'symbol':symbol,'interval':'1d','startTime':start_ms,'limit':1000},timeout=30)
+                if r.status_code==400 and 'Invalid symbol' in r.text: raise RuntimeError(f'{symbol} unavailable at {base}')
+                r.raise_for_status(); x=r.json()
+                if not x: break
+                rows.extend(x); start_ms=x[-1][6]+1
+                if len(x)<1000: break
+                time.sleep(.08)
+            if not rows: raise RuntimeError(f'No rows for {symbol} from {base}')
+            cols=['open_time','open','high','low','close','volume','close_time','qv','trades','tb','tq','ignore']
+            df=pd.DataFrame(rows,columns=cols)
+            for c in ['open','high','low','close','volume']: df[c]=pd.to_numeric(df[c])
+            df['date']=pd.to_datetime(df.open_time,unit='ms',utc=True); df=df.set_index('date')
+            now=int(pd.Timestamp.now(tz='UTC').timestamp()*1000); df=df[df.close_time<now]
+            df[['open','high','low','close','volume']].to_csv(DATA/f'{symbol}.csv')
+            print(f'DATA {symbol}: {base} ({len(df)} bars)')
+            return df[['open','high','low','close','volume']]
+        except Exception as e:
+            last_error=e; print(f'WARN provider failed {symbol} {base}: {e}')
+    raise RuntimeError(f'No market-data provider available for {symbol}: {last_error}')
 
 def psar(df,step=.02,max_step=.2):
     h,l,c=df.high.values,df.low.values,df.close.values; n=len(df)
@@ -56,7 +66,6 @@ def indicators(df):
 
 def weekly_regime(df):
     w=df.resample('W-SUN',label='right',closed='right').agg({'open':'first','high':'max','low':'min','close':'last','volume':'sum'}).dropna();p=psar(w);w['weekly_psar']=p.psar;w['weekly_bull']=p.bull
-    # shift one completed weekly observation before mapping to daily: prevents using an unfinished current week
     return w[['weekly_psar','weekly_bull']].shift(1).reindex(df.index,method='ffill')
 
 def events(symbol,z):
@@ -71,18 +80,23 @@ def events(symbol,z):
     return out
 
 def run_all():
-    OUT.mkdir(exist_ok=True); all_events=[]; latest={}
+    OUT.mkdir(exist_ok=True); all_events=[]; latest={}; failures={}
     for s in ASSETS:
-        d=fetch(s);z=indicators(d);z=z.join(weekly_regime(d));all_events+=events(s,z);r=z.iloc[-1]
-        latest[s]={k:(bool(r[k]) if k in ['psar_bull','weekly_bull'] and pd.notna(r[k]) else (None if pd.isna(r[k]) else float(r[k]))) for k in ['close','psar','psar_bull','weekly_psar','weekly_bull','rsi','adx','plus_di','minus_di','macd_hist','rvol20']}
+        try:
+            d=fetch(s);z=indicators(d);z=z.join(weekly_regime(d));all_events+=events(s,z);r=z.iloc[-1]
+            latest[s]={k:(bool(r[k]) if k in ['psar_bull','weekly_bull'] and pd.notna(r[k]) else (None if pd.isna(r[k]) else float(r[k]))) for k in ['close','psar','psar_bull','weekly_psar','weekly_bull','rsi','adx','plus_di','minus_di','macd_hist','rvol20']}
+        except Exception as e:
+            failures[s]=str(e); print(f'ERROR {s}: {e}')
+    if not latest: raise RuntimeError(f'All assets failed: {failures}')
     ev=pd.DataFrame(all_events);ev.to_csv(OUT/'events.csv',index=False)
     summary=[]
-    for (sym,side),g in ev.groupby(['symbol','side']):
-        for h in [5,10,20,30,60]:
-            x=g[f'r{h}'].dropna();summary.append({'symbol':sym,'side':side,'horizon':h,'n':len(x),'win_rate':(x>0).mean(),'mean':x.mean(),'median':x.median(),'mean_mfe60':g.mfe60.mean(),'mean_mae60':g.mae60.mean()})
+    if not ev.empty:
+        for (sym,side),g in ev.groupby(['symbol','side']):
+            for h in [5,10,20,30,60]:
+                x=g[f'r{h}'].dropna();summary.append({'symbol':sym,'side':side,'horizon':h,'n':len(x),'win_rate':(x>0).mean(),'mean':x.mean(),'median':x.median(),'mean_mfe60':g.mfe60.mean(),'mean_mae60':g.mae60.mean()})
     pd.DataFrame(summary).to_csv(OUT/'backtest_summary.csv',index=False)
-    (OUT/'latest.json').write_text(json.dumps({'generated_at':pd.Timestamp.now(tz='UTC').isoformat(),'assets':latest},indent=2))
-    print(pd.DataFrame(summary).to_string(index=False))
+    (OUT/'latest.json').write_text(json.dumps({'generated_at':pd.Timestamp.now(tz='UTC').isoformat(),'assets':latest,'failures':failures},indent=2))
+    print(pd.DataFrame(summary).to_string(index=False)); print('FAILURES',failures)
 
 if __name__=='__main__':
     ap=argparse.ArgumentParser();ap.add_argument('command',choices=['run-all']);a=ap.parse_args();run_all()
