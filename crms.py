@@ -4,7 +4,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import requests
-BASES=['https://api.binance.us/api/v3/klines','https://api.binance.com/api/v3/klines']; ASSETS=['BTCUSDT','ETHUSDT','SOLUSDT','DOTUSDT','AVAXUSDT','SUIUSDT','XRPUSDT']; DATA=Path('data');OUT=Path('output')
+BASES=['https://api.binance.us/api/v3/klines','https://api.binance.com/api/v3/klines']
+ASSETS=['BTCUSDT','ETHUSDT','SOLUSDT','DOTUSDT','AVAXUSDT','SUIUSDT','XRPUSDT','BCHUSDT','LTCUSDT','ICPUSDT','XLMUSDT','ZECUSDT','DYDXUSDT','INJUSDT','NEARUSDT','FILUSDT','LINKUSDT','ADAUSDT','ATOMUSDT','UNIUSDT']
+DATA=Path('data');OUT=Path('output')
 def fetch(symbol,start='2017-01-01'):
  DATA.mkdir(exist_ok=True);err=None
  for base in BASES:
@@ -49,7 +51,6 @@ def event_rows(sym,z):
  for i in np.flatnonzero(flip.values):
   if i+1>=len(z):continue
   side=1 if z.psar_bull.iloc[i] else -1;entry=z.close.iloc[i];sar=z.psar.iloc[i];r={'symbol':sym,'date':str(z.index[i]),'side':'LONG' if side==1 else 'SHORT','entry':entry,'weekly_ok':bool(z.weekly_bull.iloc[i])==bool(side==1) if pd.notna(z.weekly_bull.iloc[i]) else False,'macd_ok':bool(z.macd_up.iloc[i])==bool(side==1),'di_ok':bool(z.plus_di.iloc[i]>z.minus_di.iloc[i])==bool(side==1),'adx20':z.adx.iloc[i]>=20,'rsi':z.rsi.iloc[i],'rvol20':z.rvol20.iloc[i]}
-  # retest: within next 5 bars price trades back within 1 ATR of flip SAR, without requiring future knowledge at entry
   end=min(i+5,len(z)-1);zone=max(z.atr.iloc[i],abs(entry-sar)*.25);hit=None
   for k in range(i+1,end+1):
    if z.low.iloc[k]<=sar+zone and z.high.iloc[k]>=sar-zone:hit=k;break
@@ -72,8 +73,7 @@ def run_all():
  OUT.mkdir(exist_ok=True);allr=[];fails={}
  for s in ASSETS:
   try:d=fetch(s);z=indicators(d).join(weekly(d));allr+=event_rows(s,z)
-  except Exception as e:fails[s]=str(e)
- ev=pd.DataFrame(allr);ev.to_csv(OUT/'events.csv',index=False);summary=summarize(ev);summary.to_csv(OUT/'confirmation_retest.csv',index=False)
- print('\nPOOLED CONFIRMATION/RETEST RESULTS\n');print(summary.to_string(index=False));print('FAILURES',fails)
+  except Exception as e:fails[s]=str(e);print('FAIL',s,e)
+ ev=pd.DataFrame(allr);ev.to_csv(OUT/'events.csv',index=False);summary=summarize(ev);summary.to_csv(OUT/'confirmation_retest.csv',index=False);print(summary.to_string(index=False));print('FAILURES',fails)
 if __name__=='__main__':
  a=argparse.ArgumentParser();a.add_argument('command',choices=['run-all']);a.parse_args();run_all()
