@@ -12,28 +12,30 @@ def raw(s):
  z['symbol']=s;return z
 F=[]
 for s in ASSETS:
- try:F.append(raw(s))
- except Exception as e:print('FAIL',s,str(e)[:120])
-btc=next(x for x in F if x.symbol.iloc[0]=='BTCUSDT');b=btc[['r5','r10','r20','e20','e50','e200','adx']].rename(columns={x:'b'+x for x in ['r5','r10','r20','e20','e50','e200','adx']})
+ try:F.append(raw(s));print('LOAD|'+s,flush=True)
+ except Exception as e:print('FAIL|'+s+'|'+str(e)[:100],flush=True)
+btc=next(x for x in F if x.symbol.iloc[0]=='BTCUSDT');b=btc[['r5','r10','r20','e20','e50','e200']].rename(columns={x:'b'+x for x in ['r5','r10','r20','e20','e50','e200']})
 for z in F:
  z[b.columns]=b.reindex(z.index).ffill();z['btcbull']=(z.be20>z.be50)&(z.be50>z.be200);z['btcmom']=z.br20>0;z['rs5']=z.r5-z.br5;z['rs10']=z.r10-z.br10;z['rs20']=z.r20-z.br20
-df=pd.concat(F).sort_index();D=df.index.unique().sort_values();c1=D[int(len(D)*.55)];c2=D[int(len(D)*.75)];tr=df[df.index<c1];va=df[(df.index>=c1)&(df.index<c2)];te=df[df.index>=c2]
-C={'weekly':lambda x:x['weekly_bull'].eq(True),'stack':lambda x:x['ema_stack'],'btcbull':lambda x:x['btcbull'],'btcmom':lambda x:x['btcmom'],'macdpos':lambda x:x['macd_hist']>0,'macdup':lambda x:x['macd_up'],'dip':lambda x:x['dip']>0,'di10':lambda x:x['dip']>10,'adx20':lambda x:x['adx']>=20,'adx25':lambda x:x['adx']>=25,'adxup':lambda x:x['adxup'],'rsi50':lambda x:x['rsi']>=50,'rsi5570':lambda x:(x['rsi']>=55)&(x['rsi']<=70),'rsiup':lambda x:x['rsiup'],'rv1':lambda x:x['rvol20']>=1,'rv15':lambda x:x['rvol20']>=1.5,'m5':lambda x:x['r5']>.02,'m10':lambda x:x['r10']>.05,'m20':lambda x:x['r20']>.1,'break20':lambda x:x['break20'],'break50':lambda x:x['break50'],'rs5':lambda x:x['rs5']>0,'rs10':lambda x:x['rs10']>0,'rs20':lambda x:x['rs20']>0,'rs10x':lambda x:x['rs10']>.05,'atrexp':lambda x:x['atrexp'],'psar':lambda x:x['psar_bull'],'psarnew3':lambda x:x['psar_new3']}
-def ev(x,r,h):
- m=pd.Series(True,index=x.index,dtype=bool)
- for q in r:m &= C[q](x).fillna(False).astype(bool)
- y=x.loc[m,f'y{h}'].dropna();return len(y),float((y>0).mean()) if len(y) else 0,float(y.mean()) if len(y) else 0,float(y.median()) if len(y) else 0
+df=pd.concat(F).sort_index();D=df.index.unique().sort_values();c1=D[int(len(D)*.55)];c2=D[int(len(D)*.75)]
+C={'weekly':df.weekly_bull.eq(True),'stack':df.ema_stack,'btcbull':df.btcbull,'btcmom':df.btcmom,'macdpos':df.macd_hist>0,'macdup':df.macd_up,'dip':df.dip>0,'di10':df.dip>10,'adx20':df.adx>=20,'adx25':df.adx>=25,'adxup':df.adxup,'rsi50':df.rsi>=50,'rsi5570':(df.rsi>=55)&(df.rsi<=70),'rsiup':df.rsiup,'rv1':df.rvol20>=1,'rv15':df.rvol20>=1.5,'m5':df.r5>.02,'m10':df.r10>.05,'m20':df.r20>.1,'break20':df.break20,'break50':df.break50,'rs5':df.rs5>0,'rs10':df.rs10>0,'rs20':df.rs20>0,'rs10x':df.rs10>.05,'atrexp':df.atrexp,'psar':df.psar_bull,'psarnew3':df.psar_new3}
+X=np.column_stack([C[k].fillna(False).to_numpy(bool) for k in C]);names=list(C);idx=df.index.to_numpy();train=idx<np.datetime64(c1.to_datetime64());valid=(idx>=np.datetime64(c1.to_datetime64()))&(idx<np.datetime64(c2.to_datetime64()));test=idx>=np.datetime64(c2.to_datetime64())
+def stat(mask,y,part):
+ q=mask&part&np.isfinite(y);n=int(q.sum());return n,float((y[q]>0).mean()) if n else 0,float(y[q].mean()) if n else 0,float(np.median(y[q])) if n else 0
+print(f'SPLIT|{c1.date()}|{c2.date()}|assets={len(F)}|rows={len(df)}',flush=True)
 for h in [7,10,15]:
- cand=[];N=list(C)
+ print(f'START|h={h}',flush=True);y=df[f'y{h}'].to_numpy(float);cand=[];checked=0
  for k in range(2,7):
-  for r in combinations(N,k):
-   n,w,mu,md=ev(tr,r,h)
+  for ids in combinations(range(len(names)),k):
+   checked+=1;m=X[:,ids].all(axis=1);n,w,_,_=stat(m,y,train)
    if n<100:continue
-   nv,wv,mv,mdv=ev(va,r,h)
-   if nv>=35:cand.append((min(w,wv),wv,n+nv,r))
- cand.sort(reverse=True);print(f'HORIZON|{h}|train_end={c1.date()}|validation_end={c2.date()}|test_start={c2.date()}');shown=0
- for score,wv,nv,r in cand:
-  nt,wt,mt,mdt=ev(te,r,h)
+   nv,wv,_,_=stat(m,y,valid)
+   if nv>=35:cand.append((min(w,wv),wv,n+nv,ids))
+  print(f'PROGRESS|h={h}|k={k}|checked={checked}|candidates={len(cand)}',flush=True)
+ cand.sort(reverse=True);shown=0
+ for score,wv,nv,ids in cand:
+  m=X[:,ids].all(axis=1);nt,wt,mt,mdt=stat(m,y,test)
   if nt<30:continue
-  print('RULE|%s|pretest_score=%.4f|test_n=%d|test_win=%.4f|mean=%.4f|median=%.4f'%('+'.join(r),score,nt,wt,mt,mdt));shown+=1
+  print('RULE|h=%d|%s|pre=%.4f|test_n=%d|win=%.4f|mean=%.4f|median=%.4f'%(h,'+'.join(names[i] for i in ids),score,nt,wt,mt,mdt),flush=True);shown+=1
   if shown>=20:break
+ print(f'DONE|h={h}|checked={checked}',flush=True)
