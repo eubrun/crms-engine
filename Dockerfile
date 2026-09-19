@@ -3,4 +3,4 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
-CMD ["python","sar_extreme_analysis.py"]
+CMD ["python","sar_phase5_targets.py"]
