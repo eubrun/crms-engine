@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import requests
-BASES=['https://api.binance.us/api/v3/klines','https://api.binance.com/api/v3/klines']
+BASES=['https://data-api.binance.vision/api/v3/klines','https://api.binance.us/api/v3/klines','https://api.binance.com/api/v3/klines']
 ASSETS=['BTCUSDT','ETHUSDT','SOLUSDT','DOTUSDT','AVAXUSDT','SUIUSDT','XRPUSDT','BCHUSDT','LTCUSDT','ICPUSDT','XLMUSDT','ZECUSDT','DYDXUSDT','INJUSDT','NEARUSDT','FILUSDT','LINKUSDT','ADAUSDT','ATOMUSDT','UNIUSDT']
 DATA=Path('data');OUT=Path('output')
 def fetch(symbol,start='2017-01-01'):
