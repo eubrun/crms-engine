@@ -3,4 +3,4 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
-CMD ["python","sar_phase5_targets.py"]
+CMD ["python","-u","sar_phase13b_exit_fast.py"]
