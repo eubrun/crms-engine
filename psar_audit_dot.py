@@ -1,7 +1,7 @@
 import requests,pandas as pd,numpy as np
 URL='https://data-api.binance.vision/api/v3/klines'
-def get():
- r=requests.get(URL,params={'symbol':'DOTUSDT','interval':'1w','limit':1000},timeout=30);r.raise_for_status();x=r.json()
+def get(symbol):
+ r=requests.get(URL,params={'symbol':symbol,'interval':'1w','limit':1000},timeout=30);r.raise_for_status();x=r.json()
  d=pd.DataFrame(x,columns=['ot','o','h','l','c','v','ct','q','n','tb','tq','i'])
  for col in ['o','h','l','c']: d[col]=pd.to_numeric(d[col])
  d['date']=pd.to_datetime(d.ot,unit='ms',utc=True);return d
@@ -25,12 +25,11 @@ def tvsar(d,start=.02,inc=.02,maxaf=.2):
     q=max(q,h[i-1],h[i-2])
   sar[i]=q;ep[i]=e;af[i]=a;trend[i]=1 if bull else -1
  return pd.DataFrame({'raw':raw,'sar':sar,'trend':trend,'ep':ep,'af':af,'rev':rev})
-d=get();a=tvsar(d);z=pd.concat([d[['date','o','h','l','c']],a],axis=1)
-print('AUDIT|bars=%d'%len(z))
-print('AUDIT_RECENT_BEGIN');print(z.tail(45).to_string(index=False));print('AUDIT_RECENT_END')
-print('AUDIT_REVERSALS_BEGIN')
-for i,r in z[z.rev].tail(20).iterrows():
- p=z.iloc[i-1]
- print('REV|date=%s|to=%s|H=%.8g|L=%.8g|raw=%.8g|sar=%.8g|prevSAR=%.8g|prevEP=%.8g|prevAF=%.2f|newEP=%.8g'%(r.date,'BULL' if r.trend==1 else 'BEAR',r.h,r.l,r.raw,r.sar,p.sar,p.ep,p.af,r.ep))
-print('AUDIT_REVERSALS_END')
-r=z.iloc[-1];print('AUDIT_RESULT|date=%s|close=%.8g|H=%.8g|L=%.8g|raw=%.8g|sar=%.8g|trend=%s|ep=%.8g|af=%.2f|rev=%d'%(r.date,r.c,r.h,r.l,r.raw,r.sar,'BULL' if r.trend==1 else 'BEAR',r.ep,r.af,r.rev))
+
+for symbol in ['DOTUSDT','DOTUSDC']:
+ d=get(symbol);a=tvsar(d);z=pd.concat([d[['date','o','h','l','c']],a],axis=1)
+ print('AUDIT|symbol=%s|bars=%d'%(symbol,len(z)))
+ print('AUDIT_REVERSALS_BEGIN|%s'%symbol)
+ for i,r in z[z.rev].tail(8).iterrows():
+  p=z.iloc[i-1];print('REV|symbol=%s|date=%s|to=%s|H=%.8g|L=%.8g|raw=%.8g|sar=%.8g|prevSAR=%.8g|prevEP=%.8g|prevAF=%.2f|newEP=%.8g'%(symbol,r.date,'BULL' if r.trend==1 else 'BEAR',r.h,r.l,r.raw,r.sar,p.sar,p.ep,p.af,r.ep))
+ r=z.iloc[-1];print('AUDIT_RESULT|symbol=%s|date=%s|close=%.8g|H=%.8g|L=%.8g|raw=%.8g|sar=%.8g|trend=%s|ep=%.8g|af=%.2f|rev=%d'%(symbol,r.date,r.c,r.h,r.l,r.raw,r.sar,'BULL' if r.trend==1 else 'BEAR',r.ep,r.af,r.rev))
