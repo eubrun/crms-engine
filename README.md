@@ -19,8 +19,10 @@ The project is research/paper-trading infrastructure first. Live execution is in
 `sar_live_scanner.py` discovers currently tradable Binance spot USDT pairs
 through `exchangeInfo` at the start of each scan. Known fiat, stablecoin and
 tokenized equity bases are excluded; the remaining pairs form the crypto
-universe. The priority list is reported
-alongside missing Binance listings; it does not restrict the scan. The first
+universe. The priority list is scanned first and reported
+alongside missing Binance listings; it does not restrict the scan. Scans start
+at 10:00, 13:00 and 17:00 Europe/Rome daily, including daylight saving
+changes. The first
 observation of a pair initializes its baseline; only a subsequent below-to-above
 Daily SAR transition generates a paper BUY. Existing paper trades follow the
 frozen Weekly-at-entry, 8H/12H/Daily exit hierarchy.
