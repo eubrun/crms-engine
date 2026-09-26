@@ -29,6 +29,17 @@ def snap(price=101, sar=100, b8=True, b12=True, bd=True, bw=True, cross=False):
 
 
 class ScannerTest(unittest.TestCase):
+    def test_report_separates_cross_from_scan_price_and_live_sar(self):
+        snapshot = snap(price=99, sar=100, cross=True, b8=False)
+        snapshot.update(daily_high=102, daily_live_bull=True, daily_live_sar=95)
+        for tf, sar, live in (("8h", 101, 107), ("12h", 102, 108),
+                              ("1d", 100, 95)):
+            snapshot[tf].update(sar=sar, live_sar=live, live_bull=True)
+        line = scanner.live_log_line("DOTUSDT", snapshot, ["BUY"])
+        for field in ("px=99", "crossPx=100", "crossSAR=100", "sarLiveD=95",
+                      "bear8Px=99", "bear8SAR=99", "sar8=101", "sarLive8=107"):
+            self.assertIn("|" + field + "|", line + "|")
+
     def test_high_cross_is_kept_when_scan_price_falls_back(self):
         data = {"version": 1, "symbols": {}, "trades": []}
         self.assertEqual(scanner.update_symbol(data, "DOTUSDT",
