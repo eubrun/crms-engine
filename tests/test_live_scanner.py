@@ -14,14 +14,45 @@ scanner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(scanner)
 
 
-def snap(price=101, sar=100, b8=True, b12=True, bd=True, bw=True):
+def snap(price=101, sar=100, b8=True, b12=True, bd=True, bw=True, cross=False):
     return {"price": price, "quality_score": None,
+            "daily_cross": ({"day": "2026-09-26", "at": "2026-09-26T07:01:00+00:00",
+                             "price": 100., "trigger_sar": sar} if cross else None),
             "8h": {"bull": b8}, "12h": {"bull": b12},
             "1d": {"bull": bd, "sar": sar, "bar": "2026-09-26"},
             "1w": {"bull": bw}}
 
 
 class ScannerTest(unittest.TestCase):
+    def test_high_cross_is_kept_when_scan_price_falls_back(self):
+        data = {"version": 1, "symbols": {}, "trades": []}
+        self.assertEqual(scanner.update_symbol(data, "DOTUSDT",
+                         snap(price=99, cross=True, bw=False), "t1"), ["BUY"])
+        self.assertEqual(data["trades"][0]["entry"], 100.)
+        self.assertEqual(data["trades"][0]["detected_at"], "t1")
+        self.assertEqual(scanner.update_symbol(data, "DOTUSDT",
+                         snap(price=98, cross=True, bw=False), "t2"), [])
+        self.assertEqual(len(data["trades"]), 1)
+
+    def test_first_cross_minute_is_reconstructed_from_daily_high(self):
+        day = pd.Timestamp("2026-09-26", tz="UTC")
+        daily = pd.DataFrame({
+            "open": [95., 96.], "high": [98., 102.], "low": [94., 97.],
+            "close": [97., 99.], "volume": [1., 1.],
+            "ct": [int((day-pd.Timedelta(milliseconds=1)).timestamp()*1000),
+                   int((day+pd.Timedelta(days=1)-pd.Timedelta(milliseconds=1)).timestamp()*1000)]
+        }, index=[day-pd.Timedelta(days=1), day])
+        minute = pd.DataFrame({
+            "open": [98., 99., 101.], "high": [99., 101., 102.],
+            "low": [97., 98., 99.], "close": [98., 100., 99.]
+        }, index=pd.date_range(day, periods=3, freq="min"))
+        with patch.object(scanner, "klines", return_value=minute):
+            event = scanner.first_daily_cross(
+                "DOTUSDT", daily, {"bull": False, "sar": 100.},
+                int((day+pd.Timedelta(hours=8)).timestamp()*1000))
+        self.assertEqual(event["at"], (day+pd.Timedelta(minutes=1)).isoformat())
+        self.assertEqual(event["price"], 100.)
+
     def test_rome_schedule_and_daylight_saving(self):
         slot = scanner.next_scan_slot(datetime(2026, 9, 26, 7, 58, tzinfo=timezone.utc))
         self.assertEqual(slot.isoformat(), "2026-09-26T10:00:00+02:00")
@@ -66,7 +97,7 @@ class ScannerTest(unittest.TestCase):
     def test_weekly_bear_exit_and_no_duplicate_buy(self):
         data = {"version": 1, "symbols": {}, "trades": []}
         self.assertEqual(scanner.update_symbol(data, "DOTUSDT", snap(price=99, bw=False), "t0"), [])
-        self.assertEqual(scanner.update_symbol(data, "DOTUSDT", snap(bw=False), "t1"), ["BUY"])
+        self.assertEqual(scanner.update_symbol(data, "DOTUSDT", snap(bw=False, cross=True), "t1"), ["BUY"])
         self.assertEqual(scanner.update_symbol(data, "DOTUSDT", snap(bw=False), "t2"), [])
         self.assertEqual(scanner.update_symbol(data, "DOTUSDT", snap(b8=False, bw=False), "t3"), ["SELL"])
         self.assertEqual(len(data["trades"]), 1)
@@ -76,7 +107,7 @@ class ScannerTest(unittest.TestCase):
         for price, expected in [(103, "8h"), (106, "12h"), (112, "1d")]:
             data = {"version": 1, "symbols": {}, "trades": []}
             scanner.update_symbol(data, "SOLUSDT", snap(price=99), "t0")
-            scanner.update_symbol(data, "SOLUSDT", snap(price=101), "t1")
+            scanner.update_symbol(data, "SOLUSDT", snap(price=101, cross=True), "t1")
             scanner.update_symbol(data, "SOLUSDT", snap(price=price, b8=False), "t2")
             trade = data["trades"][0]
             self.assertEqual(trade["exit_tf"], expected)
