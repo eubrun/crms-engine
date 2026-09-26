@@ -241,6 +241,40 @@ def update_symbol(data, symbol, snapshot, timestamp):
     return events
 
 
+def live_log_line(symbol, snapshot, events):
+    """Keep event, scan quote and provisional SAR separate in each report row."""
+    fmt = lambda value: "%.8g" % value
+    d = snapshot["1d"]
+    quality = snapshot["quality_score"]
+    band = "NA" if quality is None else ("HIGH" if quality >= 80 else
+                                          "MEDIUM" if quality >= 60 else "LOW")
+    fields = ["LIVE", symbol, "px=" + fmt(snapshot["price"]),
+              "highD=" + fmt(snapshot["daily_high"]),
+              "sarD=" + fmt(d["sar"]),
+              "Dlive=%d" % snapshot["daily_live_bull"],
+              "sarLiveD=" + fmt(snapshot["daily_live_sar"])]
+    cross = snapshot["daily_cross"]
+    fields.extend(["crossAt=" + (cross["at"] if cross else "NA"),
+                   "crossPx=" + (fmt(cross["price"]) if cross else "NA"),
+                   "crossSAR=" + (fmt(cross["trigger_sar"]) if cross else "NA")])
+    for tf, label in (("8h", "8"), ("12h", "12"), ("1d", "D")):
+        state = snapshot[tf]
+        event_list = snapshot["bear_crosses"][tf]
+        event = event_list[-1] if event_list else None
+        fields.extend(["sar" + label + "=" + fmt(state["sar"]),
+                       "sarLive" + label + "=" + fmt(state["live_sar"]),
+                       "live" + label + "=%d" % state["live_bull"],
+                       "bear" + label + "=" + (event["at"] if event else "NA"),
+                       "bear" + label + "Px=" + (fmt(event["price"]) if event else "NA"),
+                       "bear" + label + "SAR=" + (fmt(event["trigger_sar"]) if event else "NA")])
+    fields.extend(["8H=%d" % snapshot["8h"]["bull"],
+                   "12H=%d" % snapshot["12h"]["bull"], "D=%d" % d["bull"],
+                   "W=%d" % snapshot["1w"]["bull"],
+                   "score=" + ("NA" if quality is None else str(quality)),
+                   "quality=" + band, ",".join(events) or "WAIT"])
+    return "|".join(fields)
+
+
 def scan(data, symbols):
     now_ms = int(time.time() * 1000)
     timestamp = pd.Timestamp.now(tz="UTC").isoformat()
@@ -252,14 +286,16 @@ def scan(data, symbols):
                 raw = klines(symbol, tf)
                 snapshots[tf] = market_state(raw, now_ms)
                 if tf in ("8h", "12h", "1d"):
+                    live = psar(raw[["open", "high", "low", "close", "volume"]])
+                    snapshots[tf]["live_bull"] = bool(live.bull.iloc[-1])
+                    snapshots[tf]["live_sar"] = float(live.psar.iloc[-1])
                     snapshots.setdefault("bear_crosses", {})[tf] = bearish_crosses(
                         symbol, raw, now_ms)
                 if tf == "1d":
                     snapshots["price"] = float(raw.close.iloc[-1])
                     snapshots["daily_high"] = float(raw.high.iloc[-1])
-                    live = psar(raw[["open", "high", "low", "close", "volume"]])
-                    snapshots["daily_live_bull"] = bool(live.bull.iloc[-1])
-                    snapshots["daily_live_sar"] = float(live.psar.iloc[-1])
+                    snapshots["daily_live_bull"] = snapshots[tf]["live_bull"]
+                    snapshots["daily_live_sar"] = snapshots[tf]["live_sar"]
                     snapshots["daily_cross"] = first_daily_cross(
                         symbol, raw, snapshots[tf], now_ms)
             snapshots["quality_score"] = None
@@ -283,21 +319,7 @@ def scan(data, symbols):
                     print("SCOREFAIL|%s|%s" % (symbol, str(score_exc)[:160]), flush=True)
             events = update_symbol(data, symbol, snapshots, timestamp)
             save_state(data)
-            d = snapshots["1d"]
-            quality = snapshots["quality_score"]
-            band = "NA" if quality is None else ("HIGH" if quality >= 80 else
-                                                  "MEDIUM" if quality >= 60 else "LOW")
-            cross = snapshots["daily_cross"]
-            print("LIVE|%s|px=%.8g|highD=%.8g|sarD=%.8g|Dlive=%d|sarLiveD=%.8g|crossAt=%s|crossPx=%s|bear8=%s|bear12=%s|bearD=%s|8H=%d|12H=%d|D=%d|W=%d|score=%s|quality=%s|%s" %
-                  (symbol, snapshots["price"], snapshots["daily_high"], d["sar"],
-                   snapshots["daily_live_bull"], snapshots["daily_live_sar"],
-                   cross["at"] if cross else "NA",
-                   "%.8g" % cross["price"] if cross else "NA",
-                   *[(snapshots["bear_crosses"][tf][-1]["at"] if snapshots["bear_crosses"][tf]
-                      else "NA") for tf in ("8h", "12h", "1d")], snapshots["8h"]["bull"],
-                   snapshots["12h"]["bull"], d["bull"], snapshots["1w"]["bull"],
-                   "NA" if quality is None else str(quality), band,
-                   ",".join(events) or "WAIT"), flush=True)
+            print(live_log_line(symbol, snapshots, events), flush=True)
         except Exception as exc:
             failures[symbol] = str(exc)[:160]
             print("LIVEFAIL|%s|%s" % (symbol, failures[symbol]), flush=True)
