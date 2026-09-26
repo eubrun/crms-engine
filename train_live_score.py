@@ -9,6 +9,13 @@ from pathlib import Path
 import joblib
 import numpy as np
 from sklearn.ensemble import ExtraTreesRegressor
+import crms
+
+# Restrict the refit window to recent completed cycles so hourly history fits
+# the production service's memory budget; older research remains unchanged.
+original_fetch = crms.fetch
+training_start = os.getenv("CRMS_TRAIN_START", "2023-01-01")
+crms.fetch = lambda symbol, start=training_start: original_fetch(symbol, start)
 
 source = Path(__file__).with_name("sar_phase30_entry_filters.py").read_text()
 prefix = source.split("# univariate filters:")[0]
