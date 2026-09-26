@@ -6,7 +6,9 @@ State must reside on a mounted volume (CRMS_STATE_PATH) in production.
 import json
 import os
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
@@ -27,6 +29,8 @@ NON_CRYPTO_BASES = {
 STATE = Path(os.getenv("CRMS_STATE_PATH", "output/live_state.json"))
 SCORE_PATH = Path(os.getenv("CRMS_SCORE_PATH", "/data/phase31_score.joblib"))
 SESSION = requests.Session()
+ROME = ZoneInfo("Europe/Rome")
+SCAN_HOURS = (10, 13, 17)
 
 
 def exchange_universe():
@@ -181,16 +185,39 @@ def scan(data, symbols):
           flush=True)
 
 
+def next_scan_slot(now, last_slot=None):
+    """Three local starts daily; ZoneInfo handles Rome's daylight saving time."""
+    local = now.astimezone(ROME)
+    for offset in (0, 1):
+        day = local.date() + timedelta(days=offset)
+        for hour in SCAN_HOURS:
+            slot = datetime(day.year, day.month, day.day, hour, tzinfo=ROME)
+            if slot == last_slot:
+                continue
+            # A restarted process may catch a slot up to two minutes late.
+            if slot >= local or (offset == 0 and 0 <= (local-slot).total_seconds() < 120):
+                return slot
+    raise AssertionError("no next scan slot")
+
+
 def main():
     data = load_state()
-    print("LIVE|START|state=%s" % STATE, flush=True)
+    print("LIVE|START|state=%s|schedule=10:00,13:00,17:00 Europe/Rome" % STATE,
+          flush=True)
+    last_slot = None
     while True:
-        started = time.monotonic()
+        slot = next_scan_slot(datetime.now(ROME), last_slot)
+        print("SCAN|NEXT|%s" % slot.isoformat(), flush=True)
+        while True:
+            remaining = (slot-datetime.now(ROME)).total_seconds()
+            if remaining <= 0:
+                break
+            time.sleep(min(remaining, 60))
+        last_slot = slot
         try:
             scan(data, exchange_universe())
         except Exception as exc:
             print("SCANFAIL|%s" % exc, flush=True)
-        time.sleep(max(0, 3600 - (time.monotonic() - started)))
 
 
 if __name__ == "__main__":
