@@ -12,11 +12,13 @@ import pandas as pd
 import requests
 
 from crms import psar
+from entry_quality import hourly_history, score as entry_score
 
 API = os.getenv("CRMS_MARKET_API", "https://data-api.binance.vision/api/v3").rstrip("/")
 PRIORITY = {"BCH", "LTC", "SOL", "SUI", "ICP", "DOT", "XRP", "AVAX",
             "XLM", "ZEC", "HYPE", "DYDX", "ONDO", "INJ", "RAY"}
 STATE = Path(os.getenv("CRMS_STATE_PATH", "output/live_state.json"))
+SCORE_PATH = Path(os.getenv("CRMS_SCORE_PATH", "/data/phase31_score.joblib"))
 SESSION = requests.Session()
 
 
@@ -53,7 +55,7 @@ def klines(symbol, interval, limit=1000):
     return d.set_index("date")
 
 
-def market_state(raw, now_ms, minimum=30):
+def market_state(raw, now_ms, minimum=3):
     closed = raw[raw.ct < now_ms][["open", "high", "low", "close", "volume"]]
     if len(closed) < minimum:
         raise ValueError("fewer than %d closed candles" % minimum)
@@ -137,18 +139,31 @@ def scan(data, symbols):
             snapshots = {}
             for tf in ("8h", "12h", "1d", "1w"):
                 raw = klines(symbol, tf)
-                snapshots[tf] = market_state(raw, now_ms, 3 if tf == "1w" else 30)
+                snapshots[tf] = market_state(raw, now_ms)
                 if tf == "1d":
                     snapshots["price"] = float(raw.close.iloc[-1])
-            # Phase31 score requires a fitted, causally trained ExtraTrees model.
-            # Never present a hand-made number as the frozen model's score.
             snapshots["quality_score"] = None
+            near_cross = abs(snapshots["price"] / snapshots["1d"]["sar"] - 1) <= .05
+            prior = data["symbols"].get(symbol)
+            new_cross = (prior is not None and not prior["above_daily"]
+                         and snapshots["price"] > snapshots["1d"]["sar"])
+            if SCORE_PATH.exists() and (near_cross or new_cross):
+                try:
+                    history = hourly_history(SESSION, API, symbol, now_ms)
+                    snapshots["quality_score"] = entry_score(
+                        SCORE_PATH, history, snapshots["price"])
+                except Exception as score_exc:
+                    print("SCOREFAIL|%s|%s" % (symbol, str(score_exc)[:160]), flush=True)
             events = update_symbol(data, symbol, snapshots, timestamp)
             save_state(data)
             d = snapshots["1d"]
-            print("LIVE|%s|px=%.8g|sarD=%.8g|8H=%d|12H=%d|D=%d|W=%d|score=NA|%s" %
+            quality = snapshots["quality_score"]
+            band = "NA" if quality is None else ("HIGH" if quality >= 80 else
+                                                  "MEDIUM" if quality >= 60 else "LOW")
+            print("LIVE|%s|px=%.8g|sarD=%.8g|8H=%d|12H=%d|D=%d|W=%d|score=%s|quality=%s|%s" %
                   (symbol, snapshots["price"], d["sar"], snapshots["8h"]["bull"],
                    snapshots["12h"]["bull"], d["bull"], snapshots["1w"]["bull"],
+                   "NA" if quality is None else str(quality), band,
                    ",".join(events) or "WAIT"), flush=True)
         except Exception as exc:
             failures[symbol] = str(exc)[:160]
