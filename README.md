@@ -35,7 +35,12 @@ low of each 8H, 12H or Daily candle against its preceding closed bullish SAR,
 including a crossing followed by a recovery before the scan. The first crossing
 minute and theoretical crossing price are recorded as `exited_at` and `exit`;
 `exit_detected_at` is the later scan time. Logs expose `bear8`, `bear12` and
-`bearD`. Paper fills reconstructed after the fact are not executable prices.
+`bearD`, plus `bear8Px/bear8SAR` (and corresponding 12/D fields). `crossPx`
+and `crossSAR` describe the Daily buy event. `px` is the price observed at
+the scan, while `sarLive8`, `sarLive12` and `sarLiveD` are recalculated with
+the still-open candle; these new SAR values and states are provisional until
+that candle closes. Paper fills reconstructed after the fact are not executable
+prices.
 
 Set `CRMS_STATE_PATH` to a path on a persistent Railway volume before running
 the scanner. The default `output/live_state.json` is suitable for local runs
