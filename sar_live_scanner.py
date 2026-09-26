@@ -1,46 +1,172 @@
-"""Live CRMS scanner: closed-candle PSAR + separate live price cross."""
-import time, requests, numpy as np, pandas as pd
-from crms import ASSETS, psar
-BASE='https://data-api.binance.vision/api/v3/klines'
+"""Paper-trading scanner for all active Binance spot USDT pairs.
 
-def klines(sym, interval, limit=1000):
-    r=requests.get(BASE,params={'symbol':sym,'interval':interval,'limit':limit},timeout=20); r.raise_for_status(); x=r.json()
-    if not x: raise RuntimeError('no rows')
-    cols=['ot','open','high','low','close','volume','ct','q','n','tb','tq','i']
-    d=pd.DataFrame(x,columns=cols)
-    for c in ['open','high','low','close','volume']: d[c]=pd.to_numeric(d[c])
-    d['date']=pd.to_datetime(d.ot,unit='ms',utc=True); d['ct']=pd.to_numeric(d.ct)
-    return d.set_index('date')
+PSAR uses closed candles; the live price crosses the last closed Daily SAR.
+State must reside on a mounted volume (CRMS_STATE_PATH) in production.
+"""
+import json
+import os
+import time
+from pathlib import Path
 
-def closed(d):
-    now=int(pd.Timestamp.now(tz='UTC').timestamp()*1000)
-    z=d[d.ct < now][['open','high','low','close','volume']]
-    if len(z)<3: raise RuntimeError('insufficient closed bars')
-    return z
+import pandas as pd
+import requests
 
-def closed_state(raw):
-    d=closed(raw); p=psar(d); k=len(d)-1
-    return bool(p.bull.iloc[k]),float(p.psar.iloc[k]),bool(p.bull.iloc[k-1]),d
+from crms import psar
 
-def live_price(raw): return float(raw.close.iloc[-1])
+API = os.getenv("CRMS_MARKET_API", "https://data-api.binance.vision/api/v3").rstrip("/")
+PRIORITY = {"BCH", "LTC", "SOL", "SUI", "ICP", "DOT", "XRP", "AVAX",
+            "XLM", "ZEC", "HYPE", "DYDX", "ONDO", "INJ", "RAY"}
+STATE = Path(os.getenv("CRMS_STATE_PATH", "output/live_state.json"))
+SESSION = requests.Session()
+
+
+def exchange_universe():
+    r = SESSION.get(f"{API}/exchangeInfo", timeout=30)
+    r.raise_for_status()
+    data = r.json()
+    symbols = sorted({x["symbol"] for x in data["symbols"]
+                      if x.get("status") == "TRADING" and x.get("quoteAsset") == "USDT"
+                      and x.get("isSpotTradingAllowed", True)})
+    if not symbols:
+        raise RuntimeError("exchangeInfo returned no tradable USDT spot pairs")
+    available = {s[:-4] for s in symbols}
+    print("UNIVERSE|available=%d|priority_present=%s|priority_missing=%s" %
+          (len(symbols), ",".join(sorted(PRIORITY & available)),
+           ",".join(sorted(PRIORITY - available))), flush=True)
+    return symbols
+
+
+def klines(symbol, interval, limit=1000):
+    r = SESSION.get(f"{API}/klines",
+                    params={"symbol": symbol, "interval": interval, "limit": limit},
+                    timeout=25)
+    r.raise_for_status()
+    rows = r.json()
+    if not rows:
+        raise ValueError("no candles")
+    columns = ["ot", "open", "high", "low", "close", "volume", "ct",
+               "q", "n", "tb", "tq", "i"]
+    d = pd.DataFrame(rows, columns=columns)
+    for c in ["open", "high", "low", "close", "volume", "ct"]:
+        d[c] = pd.to_numeric(d[c])
+    d["date"] = pd.to_datetime(d.ot, unit="ms", utc=True)
+    return d.set_index("date")
+
+
+def market_state(raw, now_ms):
+    closed = raw[raw.ct < now_ms][["open", "high", "low", "close", "volume"]]
+    if len(closed) < 30:
+        raise ValueError("fewer than 30 closed candles")
+    p = psar(closed)
+    return {"bull": bool(p.bull.iloc[-1]), "sar": float(p.psar.iloc[-1]),
+            "bar": closed.index[-1].isoformat(), "closed": closed}
+
+
+def load_state():
+    if not STATE.exists():
+        return {"version": 1, "symbols": {}, "trades": []}
+    data = json.loads(STATE.read_text())
+    if data.get("version") != 1:
+        raise RuntimeError("unknown state version")
+    return data
+
+
+def save_state(data):
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = STATE.with_suffix(STATE.suffix + ".tmp")
+    with tmp.open("w") as stream:
+        json.dump(data, stream, separators=(",", ":"), allow_nan=False)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(tmp, STATE)
+
+
+def update_symbol(data, symbol, snapshot, timestamp):
+    """Return BUY/SELL events; replaying the same snapshot does not duplicate trades."""
+    rows = data["symbols"]
+    previous = rows.get(symbol)
+    daily = snapshot["1d"]
+    price = snapshot["price"]
+    bullish = price > daily["sar"]
+    current = {"above_daily": bullish, "daily_bar": daily["bar"],
+               "sar_daily": daily["sar"], "price": price,
+               "bull_8h": snapshot["8h"]["bull"],
+               "bull_12h": snapshot["12h"]["bull"],
+               "bull_daily": daily["bull"]}
+    events = []
+    open_trade = next((t for t in reversed(data["trades"])
+                       if t["symbol"] == symbol and t["status"] == "OPEN"), None)
+    if previous is not None and not previous["above_daily"] and bullish and open_trade is None:
+        trade = {"symbol": symbol, "status": "OPEN", "entered_at": timestamp,
+                 "entry": price, "weekly_at_entry": snapshot["1w"]["bull"],
+                 "quality_score": snapshot.get("quality_score"), "max_price": price,
+                 "first_8h_bear": None, "exit_tf": None}
+        data["trades"].append(trade)
+        open_trade = trade
+        events.append("BUY")
+    if open_trade is not None:
+        open_trade["max_price"] = max(open_trade["max_price"], price)
+        flip8 = previous is not None and previous["bull_8h"] and not snapshot["8h"]["bull"]
+        flip12 = previous is not None and previous["bull_12h"] and not snapshot["12h"]["bull"]
+        flip_daily = previous is not None and previous["bull_daily"] and not daily["bull"]
+        if open_trade["first_8h_bear"] is None and flip8:
+            pnl = price / open_trade["entry"] - 1
+            open_trade["first_8h_bear"] = {"at": timestamp, "pnl": pnl}
+            if not open_trade["weekly_at_entry"] or pnl < .04:
+                open_trade["exit_tf"] = "8h"
+            elif pnl < .10:
+                open_trade["exit_tf"] = "12h"
+            else:
+                open_trade["exit_tf"] = "1d"
+        tf = open_trade["exit_tf"]
+        if tf and ((tf == "8h" and flip8) or (tf == "12h" and flip12)
+                   or (tf == "1d" and flip_daily)):
+            open_trade.update(status="CLOSED", exited_at=timestamp, exit=price,
+                              return_pct=100 * (price / open_trade["entry"] - 1))
+            events.append("SELL")
+    rows[symbol] = current
+    return events
+
+
+def scan(data, symbols):
+    now_ms = int(time.time() * 1000)
+    timestamp = pd.Timestamp.now(tz="UTC").isoformat()
+    failures = {}
+    for symbol in symbols:
+        try:
+            snapshots = {}
+            for tf in ("8h", "12h", "1d", "1w"):
+                raw = klines(symbol, tf)
+                snapshots[tf] = market_state(raw, now_ms)
+                if tf == "1d":
+                    snapshots["price"] = float(raw.close.iloc[-1])
+            # Phase31 score requires a fitted, causally trained ExtraTrees model.
+            # Never present a hand-made number as the frozen model's score.
+            snapshots["quality_score"] = None
+            events = update_symbol(data, symbol, snapshots, timestamp)
+            save_state(data)
+            d = snapshots["1d"]
+            print("LIVE|%s|px=%.8g|sarD=%.8g|8H=%d|12H=%d|D=%d|W=%d|score=NA|%s" %
+                  (symbol, snapshots["price"], d["sar"], snapshots["8h"]["bull"],
+                   snapshots["12h"]["bull"], d["bull"], snapshots["1w"]["bull"],
+                   ",".join(events) or "WAIT"), flush=True)
+        except Exception as exc:
+            failures[symbol] = str(exc)[:160]
+            print("LIVEFAIL|%s|%s" % (symbol, failures[symbol]), flush=True)
+    print("SCAN|DONE|scanned=%d|failed=%d" % (len(symbols) - len(failures), len(failures)),
+          flush=True)
+
 
 def main():
-    print('LIVE|START|assets=%d|psar=.02/.20|CLOSED_CANDLE_STATE=1'%len(ASSETS),flush=True)
+    data = load_state()
+    print("LIVE|START|state=%s" % STATE, flush=True)
     while True:
-      print('SCAN|%s'%pd.Timestamp.now(tz='UTC').isoformat(),flush=True)
-      for sym in ASSETS:
-       try:
-        r8=klines(sym,'8h'); r12=klines(sym,'12h'); rd=klines(sym,'1d'); rw=klines(sym,'1w')
-        b8,s8,_,_=closed_state(r8); b12,s12,_,_=closed_state(r12); bd,sd,prevd,_=closed_state(rd); bw,sw,prevw,_=closed_state(rw)
-        px=live_price(rd)
-        # Confirmed state = last CLOSED candle, matching backtest. Live cross is only an alert against the frozen closed-candle SAR level.
-        liveD=(px>sd) if not bd else (px>=sd)
-        liveW=(px>sw) if not bw else (px>=sw)
-        dist=(px-sd)/px*100 if px else np.nan
-        cross_conf=bd and not prevd
-        tag='CROSS_CONF' if cross_conf else ('BULL' if bd else 'BEAR')
-        print('LIVE|%s|px=%.8g|8Hc=%d@%.8g|12Hc=%d@%.8g|Dc=%d@%.8g|Wc=%d@%.8g|Dlive=%d|Wlive=%d|distD=%+.2f%%|%s'%(sym,px,b8,s8,b12,s12,bd,sd,bw,sw,liveD,liveW,dist,tag),flush=True)
-       except Exception as e: print('LIVEFAIL|%s|%s'%(sym,str(e)[:160]),flush=True)
-      print('SCAN|DONE',flush=True); time.sleep(3600)
+        try:
+            scan(data, exchange_universe())
+        except Exception as exc:
+            print("SCANFAIL|%s" % exc, flush=True)
+        time.sleep(3600)
 
-if __name__=='__main__': main()
+
+if __name__ == "__main__":
+    main()
