@@ -30,9 +30,12 @@ scanner instance writing that file. The process prints `LIVEFAIL` for pairs
 that cannot be scanned and reports coverage at the end of each pass.
 
 The Phase 31 Entry Quality Score is a trained ExtraTrees percentile, rather
-than a fixed weighted checklist. No trained model artifact is checked into
-this repository. The scanner reports `score=NA` until causal model training,
-feature parity, and artifact deployment are completed; BUY signals remain
-unconditional under the frozen rule. The Docker default still runs historical
-research, so a Railway service must explicitly launch
-`python -u sar_live_scanner.py`.
+than a fixed weighted checklist. Run `python -u train_live_score.py` on
+historical data to save the fitted model and its reference predictions at
+`CRMS_SCORE_PATH` (default `/data/phase31_score.joblib`). Training is an
+explicit, resource-intensive job. It must finish successfully before a score
+is published. At each new cross and for candidates within 5% of the Daily
+SAR, the scanner loads that artifact and computes the 31 Phase30 features.
+If the artifact is absent or scoring fails, it reports `score=NA`, while BUY
+remains unconditional. The Docker default still runs historical research, so
+a Railway service must explicitly launch `python -u sar_live_scanner.py`.
