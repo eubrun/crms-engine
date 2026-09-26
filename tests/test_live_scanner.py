@@ -1,4 +1,5 @@
 import importlib.util
+from datetime import datetime, timezone
 from pathlib import Path
 import tempfile
 import unittest
@@ -21,6 +22,18 @@ def snap(price=101, sar=100, b8=True, b12=True, bd=True, bw=True):
 
 
 class ScannerTest(unittest.TestCase):
+    def test_rome_schedule_and_daylight_saving(self):
+        slot = scanner.next_scan_slot(datetime(2026, 9, 26, 7, 58, tzinfo=timezone.utc))
+        self.assertEqual(slot.isoformat(), "2026-09-26T10:00:00+02:00")
+        self.assertEqual(scanner.next_scan_slot(
+            datetime(2026, 9, 26, 8, 1, tzinfo=timezone.utc), slot).hour, 13)
+        winter = scanner.next_scan_slot(
+            datetime(2026, 12, 1, 8, 58, tzinfo=timezone.utc))
+        self.assertEqual(winter.isoformat(), "2026-12-01T10:00:00+01:00")
+        following = scanner.next_scan_slot(
+            datetime(2026, 12, 1, 16, 3, tzinfo=timezone.utc))
+        self.assertEqual(following.isoformat(), "2026-12-02T10:00:00+01:00")
+
     def test_dynamic_universe_excludes_known_non_crypto(self):
         class Response:
             def raise_for_status(self):
