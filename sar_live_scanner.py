@@ -1,6 +1,6 @@
-"""Paper-trading scanner for all active Binance spot USDT pairs.
+"""Paper-trading scanner for active Binance spot USDT pairs.
 
-PSAR uses closed candles; the live price crosses the last closed Daily SAR.
+Intrabar highs/lows cross the previous closed SAR; minute candles date paper events.
 State must reside on a mounted volume (CRMS_STATE_PATH) in production.
 """
 import json
@@ -80,6 +80,23 @@ def market_state(raw, now_ms, minimum=3):
             "bar": closed.index[-1].isoformat(), "closed": closed}
 
 
+def minute_history(symbol, start, end):
+    """Read an entire candle, including Daily candles longer than 1,000 minutes."""
+    cursor = int(start.timestamp() * 1000)
+    end_ms = int(end.timestamp() * 1000)
+    parts = []
+    while cursor <= end_ms:
+        part = klines(symbol, "1m", start_time=cursor)
+        part = part[part.index <= end]
+        if part.empty:
+            break
+        parts.append(part)
+        cursor = int(part.index[-1].timestamp() * 1000) + 60_000
+        if len(part) < 1000:
+            break
+    return pd.concat(parts) if parts else pd.DataFrame()
+
+
 def first_daily_cross(symbol, daily_raw, daily_state, now_ms):
     """Find the first minute of today's high crossing the prior closed Daily SAR.
 
@@ -89,10 +106,10 @@ def first_daily_cross(symbol, daily_raw, daily_state, now_ms):
     if daily_state["bull"]:
         return None
     current = daily_raw.iloc[-1]
-    day_open_ms = int(daily_raw.index[-1].timestamp() * 1000)
     if current.ct < now_ms or float(current.high) <= daily_state["sar"]:
         return None
-    minute = klines(symbol, "1m", start_time=day_open_ms)
+    minute = minute_history(symbol, daily_raw.index[-1],
+                            pd.Timestamp(now_ms, unit="ms", tz="UTC"))
     minute = minute[(minute.index >= daily_raw.index[-1]) & (minute.index <=
              pd.Timestamp(now_ms, unit="ms", tz="UTC"))]
     crossed = minute[minute.high > daily_state["sar"]]
@@ -103,6 +120,38 @@ def first_daily_cross(symbol, daily_raw, daily_state, now_ms):
             "at": crossed.index[0].isoformat(),
             "price": max(float(first.open), daily_state["sar"]),
             "trigger_sar": daily_state["sar"]}
+
+
+def bearish_crosses(symbol, raw, now_ms, bars=4):
+    """Reconstruct bearish SAR touches within recent candles from one-minute lows."""
+    closed = raw[raw.ct < now_ms][["open", "high", "low", "close", "volume"]]
+    if len(closed) < 3:
+        return []
+    first = max(2, len(closed) - bars)
+    candidates = []
+    for i in range(first, len(raw)):
+        bar = raw.iloc[i]
+        if raw.index[i].timestamp() * 1000 > now_ms:
+            continue
+        prior = psar(raw.iloc[:i][["open", "high", "low", "close", "volume"]])
+        if not bool(prior.bull.iloc[-1]):
+            continue
+        threshold = float(prior.psar.iloc[-1])
+        if float(bar.low) >= threshold:
+            continue
+        start = raw.index[i]
+        end = min(pd.Timestamp(int(bar.ct), unit="ms", tz="UTC"),
+                  pd.Timestamp(now_ms, unit="ms", tz="UTC"))
+        minute = minute_history(symbol, start, end)
+        minute = minute[(minute.index >= start) & (minute.index <= end)]
+        crossed = minute[minute.low < threshold]
+        if crossed.empty:
+            raise ValueError("candle low crossed SAR but minute history did not confirm it")
+        first_minute = crossed.iloc[0]
+        candidates.append({"bar": start.isoformat(), "at": crossed.index[0].isoformat(),
+                           "price": min(float(first_minute.open), threshold),
+                           "trigger_sar": threshold})
+    return candidates
 
 
 def load_state():
@@ -135,6 +184,7 @@ def update_symbol(data, symbol, snapshot, timestamp):
     current = {"above_daily": bullish, "daily_bar": daily["bar"],
                "sar_daily": daily["sar"], "price": price,
                "last_cross_day": previous.get("last_cross_day") if previous else None,
+               "last_bear_bar": dict(previous.get("last_bear_bar", {})) if previous else {},
                "bull_8h": snapshot["8h"]["bull"],
                "bull_12h": snapshot["12h"]["bull"],
                "bull_daily": daily["bull"]}
@@ -157,12 +207,17 @@ def update_symbol(data, symbol, snapshot, timestamp):
         events.append("BUY")
     if open_trade is not None:
         open_trade["max_price"] = max(open_trade["max_price"], price)
-        flip8 = previous is not None and previous["bull_8h"] and not snapshot["8h"]["bull"]
-        flip12 = previous is not None and previous["bull_12h"] and not snapshot["12h"]["bull"]
-        flip_daily = previous is not None and previous["bull_daily"] and not daily["bull"]
-        if open_trade["first_8h_bear"] is None and flip8:
-            pnl = price / open_trade["entry"] - 1
-            open_trade["first_8h_bear"] = {"at": timestamp, "pnl": pnl}
+        bear_events = {}
+        for tf in ("8h", "12h", "1d"):
+            seen = current["last_bear_bar"].get(tf)
+            fresh = [e for e in snapshot.get("bear_crosses", {}).get(tf, [])
+                     if (seen is None or e["bar"] > seen)
+                     and e["at"] >= open_trade["entered_at"]]
+            bear_events[tf] = fresh[0] if fresh else None
+        first8 = bear_events["8h"]
+        if open_trade["first_8h_bear"] is None and first8:
+            pnl = first8["price"] / open_trade["entry"] - 1
+            open_trade["first_8h_bear"] = {"at": first8["at"], "pnl": pnl}
             if not open_trade["weekly_at_entry"] or pnl < .04:
                 open_trade["exit_tf"] = "8h"
             elif pnl < .10:
@@ -170,11 +225,18 @@ def update_symbol(data, symbol, snapshot, timestamp):
             else:
                 open_trade["exit_tf"] = "1d"
         tf = open_trade["exit_tf"]
-        if tf and ((tf == "8h" and flip8) or (tf == "12h" and flip12)
-                   or (tf == "1d" and flip_daily)):
-            open_trade.update(status="CLOSED", exited_at=timestamp, exit=price,
-                              return_pct=100 * (price / open_trade["entry"] - 1))
+        event = bear_events.get(tf)
+        if event and (tf == "8h" or (open_trade["first_8h_bear"] and
+                                      event["at"] >= open_trade["first_8h_bear"]["at"])):
+            open_trade.update(status="CLOSED", exited_at=event["at"],
+                              exit=event["price"], exit_detected_at=timestamp,
+                              exit_trigger_sar=event["trigger_sar"],
+                              return_pct=100 * (event["price"] / open_trade["entry"] - 1))
             events.append("SELL")
+    for tf in ("8h", "12h", "1d"):
+        found = snapshot.get("bear_crosses", {}).get(tf, [])
+        if found:
+            current["last_bear_bar"][tf] = found[-1]["bar"]
     rows[symbol] = current
     return events
 
@@ -189,6 +251,9 @@ def scan(data, symbols):
             for tf in ("8h", "12h", "1d", "1w"):
                 raw = klines(symbol, tf)
                 snapshots[tf] = market_state(raw, now_ms)
+                if tf in ("8h", "12h", "1d"):
+                    snapshots.setdefault("bear_crosses", {})[tf] = bearish_crosses(
+                        symbol, raw, now_ms)
                 if tf == "1d":
                     snapshots["price"] = float(raw.close.iloc[-1])
                     snapshots["daily_high"] = float(raw.high.iloc[-1])
@@ -223,11 +288,13 @@ def scan(data, symbols):
             band = "NA" if quality is None else ("HIGH" if quality >= 80 else
                                                   "MEDIUM" if quality >= 60 else "LOW")
             cross = snapshots["daily_cross"]
-            print("LIVE|%s|px=%.8g|highD=%.8g|sarD=%.8g|Dlive=%d|sarLiveD=%.8g|crossAt=%s|crossPx=%s|8H=%d|12H=%d|D=%d|W=%d|score=%s|quality=%s|%s" %
+            print("LIVE|%s|px=%.8g|highD=%.8g|sarD=%.8g|Dlive=%d|sarLiveD=%.8g|crossAt=%s|crossPx=%s|bear8=%s|bear12=%s|bearD=%s|8H=%d|12H=%d|D=%d|W=%d|score=%s|quality=%s|%s" %
                   (symbol, snapshots["price"], snapshots["daily_high"], d["sar"],
                    snapshots["daily_live_bull"], snapshots["daily_live_sar"],
                    cross["at"] if cross else "NA",
-                   "%.8g" % cross["price"] if cross else "NA", snapshots["8h"]["bull"],
+                   "%.8g" % cross["price"] if cross else "NA",
+                   *[(snapshots["bear_crosses"][tf][-1]["at"] if snapshots["bear_crosses"][tf]
+                      else "NA") for tf in ("8h", "12h", "1d")], snapshots["8h"]["bull"],
                    snapshots["12h"]["bull"], d["bull"], snapshots["1w"]["bull"],
                    "NA" if quality is None else str(quality), band,
                    ",".join(events) or "WAIT"), flush=True)
