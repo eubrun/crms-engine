@@ -15,7 +15,12 @@ spec.loader.exec_module(scanner)
 
 
 def snap(price=101, sar=100, b8=True, b12=True, bd=True, bw=True, cross=False):
+    bears = {tf: ([{"bar": "2026-09-26T08:00:00+00:00",
+                    "at": "2026-09-26T08:01:00+00:00", "price": price,
+                    "trigger_sar": price}] if triggered else [])
+             for tf, triggered in (("8h", not b8), ("12h", not b12), ("1d", not bd))}
     return {"price": price, "quality_score": None,
+            "bear_crosses": bears,
             "daily_cross": ({"day": "2026-09-26", "at": "2026-09-26T07:01:00+00:00",
                              "price": 100., "trigger_sar": sar} if cross else None),
             "8h": {"bull": b8}, "12h": {"bull": b12},
@@ -52,6 +57,30 @@ class ScannerTest(unittest.TestCase):
                 int((day+pd.Timedelta(hours=8)).timestamp()*1000))
         self.assertEqual(event["at"], (day+pd.Timedelta(minutes=1)).isoformat())
         self.assertEqual(event["price"], 100.)
+
+    def test_bearish_candle_low_is_kept_after_price_recovers(self):
+        day = pd.Timestamp("2026-09-26", tz="UTC")
+        idx = pd.date_range(day - pd.Timedelta(hours=24), periods=4, freq="8h")
+        raw = pd.DataFrame({"open": [105.] * 4, "high": [110.] * 4,
+                            "low": [103., 103., 103., 99.],
+                            "close": [106., 106., 106., 106.],
+                            "volume": [1.] * 4,
+                            "ct": [int((d + pd.Timedelta(hours=8) -
+                                        pd.Timedelta(milliseconds=1)).timestamp()*1000)
+                                   for d in idx]}, index=idx)
+        minute = pd.DataFrame({"open": [105., 101., 99.],
+                               "high": [106., 102., 107.],
+                               "low": [104., 99., 98.]},
+                              index=pd.date_range(idx[-1], periods=3, freq="min"))
+        class PsarResult:
+            bull = pd.Series([True])
+            psar = pd.Series([100.])
+        with patch.object(scanner, "psar", return_value=PsarResult()), \
+             patch.object(scanner, "klines", return_value=minute):
+            events = scanner.bearish_crosses("DOTUSDT", raw,
+                int((idx[-1] + pd.Timedelta(hours=1)).timestamp()*1000))
+        self.assertEqual(events[-1]["price"], 100.)
+        self.assertEqual(events[-1]["at"], minute.index[1].isoformat())
 
     def test_rome_schedule_and_daylight_saving(self):
         slot = scanner.next_scan_slot(datetime(2026, 9, 26, 7, 58, tzinfo=timezone.utc))
