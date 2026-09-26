@@ -3,6 +3,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
+import numpy as np
 import pandas as pd
 
 spec = importlib.util.spec_from_file_location(
@@ -19,6 +20,18 @@ def snap(price=101, sar=100, b8=True, b12=True, bd=True, bw=True):
 
 
 class ScannerTest(unittest.TestCase):
+    def test_phase31_feature_schema(self):
+        from entry_quality import FEATURES, live_features
+        index = pd.date_range("2026-01-01", periods=24*220, freq="h", tz="UTC")
+        values = np.linspace(90, 110, len(index))
+        history = pd.DataFrame({"open": values, "high": values+1,
+                                "low": values-1, "close": values,
+                                "volume": 100.}, index=index)
+        features = live_features(history, 110.)
+        self.assertEqual(list(features.columns), FEATURES)
+        self.assertEqual(len(FEATURES), 31)
+        self.assertTrue(np.isfinite(features.to_numpy()).all())
+
     def test_weekly_bear_exit_and_no_duplicate_buy(self):
         data = {"version": 1, "symbols": {}, "trades": []}
         self.assertEqual(scanner.update_symbol(data, "DOTUSDT", snap(price=99, bw=False), "t0"), [])
