@@ -36,7 +36,8 @@ def exchange_universe():
     symbols = sorted({x["symbol"] for x in data["symbols"]
                       if x.get("status") == "TRADING" and x.get("quoteAsset") == "USDT"
                       and x.get("isSpotTradingAllowed", True)
-                      and x.get("baseAsset") not in NON_CRYPTO_BASES})
+                      and x.get("baseAsset") not in NON_CRYPTO_BASES},
+                     key=lambda s: (s[:-4] not in PRIORITY, s))
     if not symbols:
         raise RuntimeError("exchangeInfo returned no tradable USDT spot pairs")
     available = {s[:-4] for s in symbols}
@@ -184,11 +185,12 @@ def main():
     data = load_state()
     print("LIVE|START|state=%s" % STATE, flush=True)
     while True:
+        started = time.monotonic()
         try:
             scan(data, exchange_universe())
         except Exception as exc:
             print("SCANFAIL|%s" % exc, flush=True)
-        time.sleep(3600)
+        time.sleep(max(0, 3600 - (time.monotonic() - started)))
 
 
 if __name__ == "__main__":
