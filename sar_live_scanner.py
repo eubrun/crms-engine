@@ -17,6 +17,13 @@ from entry_quality import hourly_history, score as entry_score
 API = os.getenv("CRMS_MARKET_API", "https://data-api.binance.vision/api/v3").rstrip("/")
 PRIORITY = {"BCH", "LTC", "SOL", "SUI", "ICP", "DOT", "XRP", "AVAX",
             "XLM", "ZEC", "HYPE", "DYDX", "ONDO", "INJ", "RAY"}
+NON_CRYPTO_BASES = {
+    "EUR", "EURI", "GBP", "AUD", "BRL", "TRY", "ARS", "UAH", "BIDR", "IDRT",
+    "USDC", "FDUSD", "BFUSD", "TUSD", "USDP", "USD1", "USDE", "PYUSD", "DAI",
+    "AAOIB", "AAPLB", "AMZNB", "AVGOB", "ASMLB", "ASTSB", "CRCLB", "CRDOB",
+    "DELLB", "EWYB", "FLNCB", "GLWB", "GMEB", "GOOGLB", "GSB", "HOODB",
+    "IBMB", "MSFTB", "NVDAB", "TSLAB",
+}
 STATE = Path(os.getenv("CRMS_STATE_PATH", "output/live_state.json"))
 SCORE_PATH = Path(os.getenv("CRMS_SCORE_PATH", "/data/phase31_score.joblib"))
 SESSION = requests.Session()
@@ -28,7 +35,8 @@ def exchange_universe():
     data = r.json()
     symbols = sorted({x["symbol"] for x in data["symbols"]
                       if x.get("status") == "TRADING" and x.get("quoteAsset") == "USDT"
-                      and x.get("isSpotTradingAllowed", True)})
+                      and x.get("isSpotTradingAllowed", True)
+                      and x.get("baseAsset") not in NON_CRYPTO_BASES})
     if not symbols:
         raise RuntimeError("exchangeInfo returned no tradable USDT spot pairs")
     available = {s[:-4] for s in symbols}
