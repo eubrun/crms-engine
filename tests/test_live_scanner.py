@@ -2,6 +2,7 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -20,6 +21,23 @@ def snap(price=101, sar=100, b8=True, b12=True, bd=True, bw=True):
 
 
 class ScannerTest(unittest.TestCase):
+    def test_dynamic_universe_excludes_known_non_crypto(self):
+        class Response:
+            def raise_for_status(self):
+                pass
+            def json(self):
+                return {"symbols": [
+                    {"symbol": "HYPEUSDT", "baseAsset": "HYPE", "quoteAsset": "USDT",
+                     "status": "TRADING"},
+                    {"symbol": "DOTUSDT", "baseAsset": "DOT", "quoteAsset": "USDT",
+                     "status": "TRADING"},
+                    {"symbol": "FDUSDUSDT", "baseAsset": "FDUSD", "quoteAsset": "USDT",
+                     "status": "TRADING"},
+                    {"symbol": "AAPLBUSDT", "baseAsset": "AAPLB", "quoteAsset": "USDT",
+                     "status": "TRADING"}]}
+        with patch.object(scanner.SESSION, "get", return_value=Response()):
+            self.assertEqual(scanner.exchange_universe(), ["DOTUSDT", "HYPEUSDT"])
+
     def test_phase31_feature_schema(self):
         from entry_quality import FEATURES, live_features
         index = pd.date_range("2026-01-01", periods=24*220, freq="h", tz="UTC")
