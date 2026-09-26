@@ -30,7 +30,12 @@ that SAR. This captures a touch followed by a retreat before scan time. The
 log shows both the frozen trigger SAR and the current candle's provisional
 Daily SAR state/value. A late discovery is a historical paper signal, not a
 claim that the crossing price remains executable. Existing paper trades follow the
-frozen Weekly-at-entry, 8H/12H/Daily exit hierarchy.
+frozen Weekly-at-entry, 8H/12H/Daily exit hierarchy. Bearish exits use the
+low of each 8H, 12H or Daily candle against its preceding closed bullish SAR,
+including a crossing followed by a recovery before the scan. The first crossing
+minute and theoretical crossing price are recorded as `exited_at` and `exit`;
+`exit_detected_at` is the later scan time. Logs expose `bear8`, `bear12` and
+`bearD`. Paper fills reconstructed after the fact are not executable prices.
 
 Set `CRMS_STATE_PATH` to a path on a persistent Railway volume before running
 the scanner. The default `output/live_state.json` is suitable for local runs
