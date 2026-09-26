@@ -53,10 +53,10 @@ def klines(symbol, interval, limit=1000):
     return d.set_index("date")
 
 
-def market_state(raw, now_ms):
+def market_state(raw, now_ms, minimum=30):
     closed = raw[raw.ct < now_ms][["open", "high", "low", "close", "volume"]]
-    if len(closed) < 30:
-        raise ValueError("fewer than 30 closed candles")
+    if len(closed) < minimum:
+        raise ValueError("fewer than %d closed candles" % minimum)
     p = psar(closed)
     return {"bull": bool(p.bull.iloc[-1]), "sar": float(p.psar.iloc[-1]),
             "bar": closed.index[-1].isoformat(), "closed": closed}
@@ -137,7 +137,7 @@ def scan(data, symbols):
             snapshots = {}
             for tf in ("8h", "12h", "1d", "1w"):
                 raw = klines(symbol, tf)
-                snapshots[tf] = market_state(raw, now_ms)
+                snapshots[tf] = market_state(raw, now_ms, 3 if tf == "1w" else 30)
                 if tf == "1d":
                     snapshots["price"] = float(raw.close.iloc[-1])
             # Phase31 score requires a fitted, causally trained ExtraTrees model.
