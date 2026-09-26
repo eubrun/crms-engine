@@ -23,8 +23,13 @@ universe. The priority list is scanned first and reported
 alongside missing Binance listings; it does not restrict the scan. Scans start
 at 10:00, 13:00 and 17:00 Europe/Rome daily, including daylight saving
 changes. The first
-observation of a pair initializes its baseline; only a subsequent below-to-above
-Daily SAR transition generates a paper BUY. Existing paper trades follow the
+observation of a pair can reconstruct an intraday cross from today's one-minute
+candles: the day's high must exceed the last closed bearish Daily SAR, and the
+first crossing minute sets a theoretical entry at the higher of its open and
+that SAR. This captures a touch followed by a retreat before scan time. The
+log shows both the frozen trigger SAR and the current candle's provisional
+Daily SAR state/value. A late discovery is a historical paper signal, not a
+claim that the crossing price remains executable. Existing paper trades follow the
 frozen Weekly-at-entry, 8H/12H/Daily exit hierarchy.
 
 Set `CRMS_STATE_PATH` to a path on a persistent Railway volume before running
